@@ -1,0 +1,84 @@
+#!/bin/bash
+BIN_DIR="$KZ_BIN"
+CONF_DIR="$KZ_DIR"
+STATE="$KZ_STATE"
+mkdir -p "$STATE"
+echo "$(date +%T) systemctl $*" >> "$STATE/systemctl.log"
+
+verb=""; now=0; skip=0; units=""
+for a in "$@"; do
+  if [ "$skip" = 1 ]; then skip=0; continue; fi
+  case "$a" in
+    --now) now=1 ;;
+    -s) skip=1 ;;
+    -*) ;;
+    *) if [ -z "$verb" ]; then verb="$a"; else units="$units $a"; fi ;;
+  esac
+done
+
+name_of() {
+  u=$(printf '%s' "$1" | sed 's/\.service$//')
+  case "$u" in
+    kariz@*) printf '%s' "$u" | sed 's/^kariz@//' ;;
+  esac
+}
+pidf() { echo "$STATE/$1.pid"; }
+alive() {
+  [ -f "$(pidf "$1")" ] && kill -0 "$(cat "$(pidf "$1")")" 2>/dev/null
+}
+start_one() {
+  n="$1"
+  rm -f "$STATE/$n.stopped"
+  if alive "$n"; then return 0; fi
+  if [ ! -f "$CONF_DIR/$n.toml" ]; then echo "kariz-systemctl: no config for $n" >&2; return 1; fi
+  nohup "$BIN_DIR/kariz" run -c "$CONF_DIR/$n.toml" </dev/null >>"$STATE/$n.log" 2>&1 &
+  echo $! > "$(pidf "$n")"
+  sleep 1
+  alive "$n"
+}
+stop_one() {
+  n="$1"
+  touch "$STATE/$n.stopped"
+  if alive "$n"; then
+    p=$(cat "$(pidf "$n")")
+    kill "$p" 2>/dev/null
+    i=0
+    while [ "$i" -lt 20 ] && kill -0 "$p" 2>/dev/null; do sleep 0.2; i=$((i+1)); done
+    kill -9 "$p" 2>/dev/null
+  fi
+  rm -f "$(pidf "$n")"
+}
+
+rc=0
+case "$verb" in
+  start|restart|reload|reload-or-restart|try-restart)
+    for u in $units; do
+      n=$(name_of "$u"); [ -n "$n" ] || continue
+      if [ "$verb" != start ]; then stop_one "$n"; fi
+      start_one "$n" || rc=1
+    done ;;
+  enable)
+    if [ "$now" = 1 ]; then
+      for u in $units; do n=$(name_of "$u"); [ -n "$n" ] || continue; start_one "$n" || rc=1; done
+    fi ;;
+  stop)
+    for u in $units; do n=$(name_of "$u"); [ -n "$n" ] || continue; stop_one "$n"; done ;;
+  disable)
+    if [ "$now" = 1 ]; then
+      for u in $units; do n=$(name_of "$u"); [ -n "$n" ] || continue; stop_one "$n"; done
+    fi ;;
+  is-active)
+    for u in $units; do
+      n=$(name_of "$u")
+      if [ -n "$n" ] && alive "$n"; then echo active; else echo inactive; rc=3; fi
+    done ;;
+  is-enabled) echo enabled ;;
+  list-units|list-unit-files)
+    for f in "$STATE"/*.pid; do
+      [ -e "$f" ] || continue
+      n=$(basename "$f" .pid)
+      if alive "$n"; then echo "kariz@$n.service loaded active running Kariz tunnel $n"; fi
+    done ;;
+  *) ;;
+esac
+exit $rc
